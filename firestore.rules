@@ -1,0 +1,109 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId}
+    // Fields:
+    //   - uid: string (required, immutable) - Unique user ID
+    //   - email: string (required, email format) - User email
+    //   - displayName: string (required, 1-100 chars) - User display name
+    //   - monthlyBudget: number (required, positive) - User's monthly budget
+    //   - createdAt: string (required, ISO 8601) - Account creation timestamp
+    //
+    // Collection: transactions
+    // Document ID: {transactionId}
+    // Fields:
+    //   - id: string (required) - Transaction ID
+    //   - uid: string (required, immutable) - User ID who owns the transaction
+    //   - type: string (required, enum: ['income', 'expense']) - Transaction type
+    //   - category: string (required, 1-50 chars) - Transaction category
+    //   - amount: number (required, positive) - Transaction amount
+    //   - description: string (required, 0-200 chars) - Transaction description
+    //   - date: string (required, ISO 8601 date) - Transaction date
+    //   - createdAt: string (required, ISO 8601) - Creation timestamp
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.uid;
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string && dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    function isValidDateOnlyString(dateStr) {
+      return dateStr is string && dateStr.matches("^\\d{4}-\\d{2}-\\d{2}$");
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "nathanjames.info@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    // Domain Validators
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'monthlyBudget', 'createdAt']) &&
+             data.uid is string && data.uid == request.auth.uid &&
+             isValidEmail(data.email) &&
+             data.displayName is string && data.displayName.size() > 0 && data.displayName.size() <= 100 &&
+             data.monthlyBudget is number && data.monthlyBudget >= 0 &&
+             isValidDateString(data.createdAt);
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['id', 'uid', 'type', 'category', 'amount', 'description', 'date', 'createdAt']) &&
+             data.id is string &&
+             data.uid is string && data.uid == request.auth.uid &&
+             data.type in ['income', 'expense'] &&
+             data.category is string && data.category.size() > 0 && data.category.size() <= 50 &&
+             data.amount is number && data.amount >= 0 &&
+             data.description is string && data.description.size() <= 200 &&
+             (isValidDateOnlyString(data.date) || isValidDateString(data.date)) &&
+             isValidDateString(data.createdAt);
+    }
+
+    // Rules
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if (isOwner(userId) || isAdmin()) && isValidUser(request.resource.data) && 
+                      request.resource.data.uid == resource.data.uid &&
+                      request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isAdmin();
+    }
+
+    match /transactions/{transactionId} {
+      allow read: if isAuthenticated() && (isAdmin() || resource == null || resource.data.uid == request.auth.uid);
+      allow create: if isAuthenticated() && isValidTransaction(request.resource.data);
+      allow update: if (isDocOwner() || isAdmin()) && isValidTransaction(request.resource.data) &&
+                      request.resource.data.uid == resource.data.uid &&
+                      request.resource.data.id == resource.data.id &&
+                      request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    // Default deny
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}
